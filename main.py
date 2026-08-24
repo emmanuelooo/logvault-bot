@@ -12,10 +12,11 @@ app = Flask(__name__)
 def health_check():
     return "LogVault Bot Active", 200
 
-BOT_TOKEN = "8760290765:AAGNQIoMP4UwhbKlvQFm9mcnF76logqNv1o"
-ADMIN_ID = 8663858182
-BRIDGE_URL = "https://logvault.page.gd/bridge.php"
-SECRET_KEY = "Emmanuel16908"
+# Retrieve configuration securely from Environment Variables
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+ADMIN_ID = int(os.environ.get("ADMIN_ID", "8663858182"))
+BRIDGE_URL = os.environ.get("BRIDGE_URL", "https://logvault.page.gd/bridge.php")
+SECRET_KEY = os.environ.get("SECRET_KEY", "Emmanuel16908")
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
