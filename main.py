@@ -1,5 +1,6 @@
 import os
 import re
+import time
 import threading
 import psycopg2
 import telebot
@@ -91,8 +92,13 @@ def handle_add_product(message):
 def start_polling():
     print("Clearing old webhooks/connections...")
     bot.remove_webhook()
-    print("Starting bot polling...")
-    bot.infinity_polling(skip_pending=True)
+    print("Starting bot polling loop with auto-reconnect...")
+    while True:
+        try:
+            bot.polling(none_stop=True, interval=0, timeout=20)
+        except Exception as e:
+            print(f"Polling connection issue: {e}")
+            time.sleep(5)
 
 if __name__ == "__main__":
     init_db()
