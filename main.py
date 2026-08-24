@@ -88,7 +88,8 @@ def handle_add_product(message):
 
     try:
         session = get_session()
-        res = session.post(BRIDGE_URL, data=payload, timeout=15)
+        # Switched to GET request via params to bypass InfinityFree POST block
+        res = session.get(BRIDGE_URL, params=payload, timeout=15)
         
         if "SUCCESS:" in res.text:
             prod_id = res.text.split(":")[1].strip()
