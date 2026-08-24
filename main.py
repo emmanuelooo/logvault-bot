@@ -1,9 +1,8 @@
 import os
 import re
 import threading
-import requests
+import psycopg2
 import telebot
-import pyaes
 from flask import Flask
 
 app = Flask(__name__)
@@ -12,44 +11,35 @@ app = Flask(__name__)
 def health_check():
     return "LogVault Bot Active", 200
 
-# Retrieve configuration securely from Environment Variables
+# Environment Variables
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "8663858182"))
-BRIDGE_URL = os.environ.get("BRIDGE_URL", "https://logvault.page.gd/bridge.php")
-SECRET_KEY = os.environ.get("SECRET_KEY", "Emmanuel16908")
+DATABASE_URL = os.environ.get("DATABASE_URL")
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
-def hex_to_bytes(hex_str):
-    return bytes.fromhex(hex_str)
+def get_db_connection():
+    return psycopg2.connect(DATABASE_URL)
 
-def solve_infinityfree_cookie(html):
-    # Extract AES parameters from InfinityFree anti-bot challenge
-    a_hex = re.search(r'a=toNumbers\("([a-f0-9]+)"\)', html).group(1)
-    b_hex = re.search(r'b=toNumbers\("([a-f0-9]+)"\)', html).group(1)
-    c_hex = re.search(r'c=toNumbers\("([a-f0-9]+)"\)', html).group(1)
-
-    key = hex_to_bytes(a_hex)
-    iv = hex_to_bytes(b_hex)
-    ciphertext = hex_to_bytes(c_hex)
-
-    # Decrypt CBC mode cleanly
-    decryptor = pyaes.Decrypter(pyaes.AESModeOfOperationCBC(key, iv))
-    decrypted = decryptor.feed(ciphertext)
-    
-    return decrypted.hex()
-
-def get_session():
-    s = requests.Session()
-    s.headers.update({
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-    })
-    
-    res = s.get(BRIDGE_URL)
-    if "slowAES" in res.text:
-        cookie_val = solve_infinityfree_cookie(res.text)
-        s.cookies.set("__test", cookie_val, domain="logvault.page.gd", path="/")
-    return s
+def init_db():
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS products (
+                id SERIAL PRIMARY KEY,
+                title VARCHAR(255) NOT NULL,
+                price NUMERIC(10, 2) NOT NULL,
+                data TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        """)
+        conn.commit()
+        cur.close()
+        conn.close()
+        print("Database initialized successfully.")
+    except Exception as e:
+        print(f"Error initializing database: {e}")
 
 @bot.message_handler(commands=['addproduct'])
 def handle_add_product(message):
@@ -79,25 +69,24 @@ def handle_add_product(message):
     price = price_match.group(1).strip()
     accounts_data = data_match.group(1).strip()
 
-    payload = {
-        'key': SECRET_KEY,
-        'title': title,
-        'price': price,
-        'data': accounts_data
-    }
-
     try:
-        session = get_session()
-        # Switched to GET request via params to bypass InfinityFree POST block
-        res = session.get(BRIDGE_URL, params=payload, timeout=15)
-        
-        if "SUCCESS:" in res.text:
-            prod_id = res.text.split(":")[1].strip()
-            bot.reply_to(message, f"✅ Product Added!\n🆔 ID: {prod_id}\n📦 Title: {title}\n💰 Price: ₦{price}")
-        else:
-            bot.reply_to(message, f"❌ Bridge Response Error:\n`{res.text}`", parse_mode="Markdown")
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO products (title, price, data) VALUES (%s, %s, %s) RETURNING id;",
+            (title, float(price), accounts_data)
+        )
+        prod_id = cur.fetchone()[0]
+        conn.commit()
+        cur.close()
+        conn.close()
+
+        bot.reply_to(
+            message,
+            f"✅ Product Added!\n🆔 ID: {prod_id}\n📦 Title: {title}\n💰 Price: ₦{price}"
+        )
     except Exception as e:
-        bot.reply_to(message, f"❌ Connection Error: {str(e)}")
+        bot.reply_to(message, f"❌ Database Error: {str(e)}")
 
 def start_polling():
     print("Clearing old webhooks/connections...")
@@ -106,6 +95,8 @@ def start_polling():
     bot.infinity_polling(skip_pending=True)
 
 if __name__ == "__main__":
+    init_db()
+    
     t = threading.Thread(target=start_polling)
     t.daemon = True
     t.start()
