@@ -89,6 +89,62 @@ def handle_add_product(message):
     except Exception as e:
         bot.reply_to(message, f"❌ Database Error: {str(e)}")
 
+@bot.message_handler(commands=['stock'])
+def handle_stock(message):
+    if message.from_user.id != ADMIN_ID:
+        bot.reply_to(message, "⛔ Unauthorized.")
+        return
+
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT id, title, price, created_at FROM products ORDER BY id ASC;")
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+
+        if not rows:
+            bot.reply_to(message, "📦 Stock is empty. No products found.")
+            return
+
+        response = "📦 **Current Available Stock:**\n\n"
+        for row in rows:
+            prod_id, title, price, created_at = row
+            response += f"🆔 **ID:** `{prod_id}` | 📦 **{title}**\n💰 **Price:** ₦{price:.2f}\n\n"
+
+        bot.reply_to(message, response, parse_mode="Markdown")
+    except Exception as e:
+        bot.reply_to(message, f"❌ Database Error: {str(e)}")
+
+@bot.message_handler(commands=['deleteproduct'])
+def handle_delete_product(message):
+    if message.from_user.id != ADMIN_ID:
+        bot.reply_to(message, "⛔ Unauthorized.")
+        return
+
+    parts = message.text.split()
+    if len(parts) < 2 or not parts[1].isdigit():
+        bot.reply_to(message, "❌ Invalid usage!\nUse: `/deleteproduct [ID]`\nExample: `/deleteproduct 1`", parse_mode="Markdown")
+        return
+
+    prod_id = int(parts[1])
+
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("DELETE FROM products WHERE id = %s RETURNING title;", (prod_id,))
+        deleted = cur.fetchone()
+        conn.commit()
+        cur.close()
+        conn.close()
+
+        if deleted:
+            bot.reply_to(message, f"🗑️ Product ID `{prod_id}` ({deleted[0]}) deleted successfully!", parse_mode="Markdown")
+        else:
+            bot.reply_to(message, f"❌ Product ID `{prod_id}` not found in database.", parse_mode="Markdown")
+    except Exception as e:
+        bot.reply_to(message, f"❌ Database Error: {str(e)}")
+
 def start_polling():
     print("Clearing old webhooks/connections...")
     bot.remove_webhook()
