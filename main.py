@@ -78,14 +78,14 @@ def handle_add_product(message):
     except Exception as e:
         bot.reply_to(message, f"❌ **Connection Error:** {str(e)}")
 
-# Start Telegram polling thread as soon as main.py loads
 def run_bot():
-    bot.infinity_polling()
-
-threading.Thread(target=run_bot, daemon=True).start()
-
-# Bind Flask server at module level
-port = int(os.environ.get("PORT", 10000))
+    # Remove any leftover webhooks/connections before long polling
+    bot.remove_webhook()
+    bot.infinity_polling(skip_pending=True)
 
 if __name__ == "__main__":
+    # Start bot thread ONLY when main script runs directly
+    threading.Thread(target=run_bot, daemon=True).start()
+    
+    port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
