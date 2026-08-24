@@ -32,9 +32,9 @@ def solve_infinityfree_cookie(html):
     iv = hex_to_bytes(b_hex)
     ciphertext = hex_to_bytes(c_hex)
 
-    # Decrypt CBC mode
+    # Decrypt CBC mode cleanly
     decryptor = pyaes.Decrypter(pyaes.AESModeOfOperationCBC(key, iv))
-    decrypted = decryptor.feed(ciphertext) + decryptor.finalize()
+    decrypted = decryptor.feed(ciphertext)
     
     return decrypted.hex()
 
