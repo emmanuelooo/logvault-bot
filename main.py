@@ -3,7 +3,7 @@ import re
 import threading
 import requests
 import telebot
-import js2py
+import pyaes
 from flask import Flask
 
 app = Flask(__name__)
@@ -19,31 +19,34 @@ SECRET_KEY = "Emmanuel16908"
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
-def get_infinityfree_session():
-    session = requests.Session()
-    session.headers.update({
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-    })
+def hex_to_bytes(hex_str):
+    return bytes.fromhex(hex_str)
+
+def solve_infinityfree_cookie(html):
+    # Extract AES parameters from the InfinityFree script
+    a_hex = re.search(r'a=toNumbers\("([a-f0-9]+)"\)', html).group(1)
+    b_hex = re.search(r'b=toNumbers\("([a-f0-9]+)"\)', html).group(1)
+    c_hex = re.search(r'c=toNumbers\("([a-f0-9]+)"\)', html).group(1)
+
+    key = hex_to_bytes(a_hex)
+    iv = hex_to_bytes(b_hex)
+    ciphertext = hex_to_bytes(c_hex)
+
+    # Decrypt CBC mode
+    decryptor = pyaes.Decrypter(pyaes.AESModeOfOperationCBC(key, iv))
+    decrypted = decryptor.feed(ciphertext) + decryptor.finalize()
     
-    # First request to grab the AES challenge
-    res = session.get(BRIDGE_URL)
+    return decrypted.hex()
+
+def get_session():
+    s = requests.Session()
+    s.headers.update({'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'})
+    
+    res = s.get(BRIDGE_URL)
     if "slowAES" in res.text:
-        # Extract script logic and resolve cookie
-        aes_js = session.get("https://logvault.page.gd/aes.js").text
-        
-        # Combine script and challenge
-        full_js = aes_js + "\n" + re.search(r'<script>(.*?)</script>', res.text, re.DOTALL).group(1)
-        full_js = full_js.replace("location.href=", "//")
-        
-        # Execute JS environment to retrieve document.cookie
-        context = js2py.EvalJs()
-        context.execute("var document = {}; " + full_js)
-        
-        cookie_str = context.document.cookie
-        cookie_name, cookie_val = cookie_str.split(';')[0].split('=')
-        session.cookies.set(cookie_name, cookie_val)
-        
-    return session
+        cookie_val = solve_infinityfree_cookie(res.text)
+        s.cookies.set("__test", cookie_val, domain="logvault.page.gd", path="/")
+    return s
 
 @bot.message_handler(commands=['addproduct'])
 def handle_add_product(message):
@@ -52,7 +55,6 @@ def handle_add_product(message):
         return
 
     text = message.text
-
     title_match = re.search(r'Title:\s*(.*?)\n', text, re.IGNORECASE)
     price_match = re.search(r'Price:\s*(.*?)\n', text, re.IGNORECASE)
     data_match = re.search(r'Data:\s*\n(.*)', text, re.DOTALL | re.IGNORECASE)
@@ -73,14 +75,14 @@ def handle_add_product(message):
     }
 
     try:
-        session = get_infinityfree_session()
+        session = get_session()
         res = session.post(BRIDGE_URL, data=payload, timeout=15)
         
         if "SUCCESS:" in res.text:
             prod_id = res.text.split(":")[1].strip()
             bot.reply_to(message, f"✅ Product Added!\n🆔 ID: {prod_id}\n📦 Title: {title}\n💰 Price: ₦{price}")
         else:
-            bot.reply_to(message, f"❌ Bridge Error:\n`{res.text}`", parse_mode="Markdown")
+            bot.reply_to(message, f"❌ Bridge Response Error:\n`{res.text}`", parse_mode="Markdown")
     except Exception as e:
         bot.reply_to(message, f"❌ Connection Error: {str(e)}")
 
