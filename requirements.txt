@@ -1,4 +1,4 @@
 pyTelegramBotAPI
 requests
 flask
-pyaes
+psycopg2-binary
