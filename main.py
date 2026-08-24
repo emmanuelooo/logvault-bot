@@ -82,3 +82,8 @@ def handle_add_product(message):
 if __name__ == "__main__":
     print("LogVault Telegram Bot is running...")
     bot.infinity_polling()
+
+if __name__ == "__main__":
+    # Render assigns dynamic ports via $PORT environment variable
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
