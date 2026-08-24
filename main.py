@@ -5,14 +5,12 @@ import requests
 import telebot
 from flask import Flask
 
-# Initialize Flask app
 app = Flask(__name__)
 
 @app.route('/')
 def health_check():
-    return "LogVault Bot is Active!", 200
+    return "LogVault Bot Active", 200
 
-# Credentials
 BOT_TOKEN = "8760290765:AAEiSfJeKlFx9jxLlGCRep9ZTtdPmXz5Gmw"
 ADMIN_ID = 8663858182
 BRIDGE_URL = "https://logvault.page.gd/bridge.php"
@@ -22,8 +20,10 @@ bot = telebot.TeleBot(BOT_TOKEN)
 
 @bot.message_handler(commands=['addproduct'])
 def handle_add_product(message):
+    print(f"Incoming message from User ID: {message.from_user.id}")
+    
     if message.from_user.id != ADMIN_ID:
-        bot.reply_to(message, "⛔ Unauthorized access.")
+        bot.reply_to(message, "⛔ Unauthorized.")
         return
 
     text = message.text
@@ -35,14 +35,12 @@ def handle_add_product(message):
     if not (title_match and price_match and data_match):
         bot.reply_to(
             message,
-            "❌ **Invalid Format!**\n\n"
-            "Use this format:\n"
-            "`/addproduct`\n"
+            "❌ Format incorrect! Send message using:\n\n"
+            "/addproduct\n"
             "Category: Instagram\n"
             "Title: Aged 2020 Account\n"
             "Price: 3500\n"
-            "Data:\nuser:pass",
-            parse_mode="Markdown"
+            "Data:\nuser:pass"
         )
         return
 
@@ -57,35 +55,32 @@ def handle_add_product(message):
         'data': accounts_data
     }
 
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36'
-    }
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
 
     try:
-        response = requests.post(BRIDGE_URL, data=payload, headers=headers, timeout=15)
-        if "SUCCESS:" in response.text:
-            prod_id = response.text.split(":")[1].strip()
-            bot.reply_to(
-                message,
-                f"✅ *Product Uploaded to LogVault!*\n\n"
-                f"🆔 *ID:* `{prod_id}`\n"
-                f"📦 *Title:* {title}\n"
-                f"💰 *Price:* ₦{float(price):,.2f}",
-                parse_mode="Markdown"
-            )
+        res = requests.post(BRIDGE_URL, data=payload, headers=headers, timeout=15)
+        print(f"Bridge raw response: {res.text}")
+        
+        if "SUCCESS:" in res.text:
+            prod_id = res.text.split(":")[1].strip()
+            bot.reply_to(message, f"✅ Product Added!\n🆔 ID: {prod_id}\n📦 Title: {title}\n💰 Price: ₦{price}")
         else:
-            bot.reply_to(message, f"❌ **Bridge Error:**\n`{response.text}`", parse_mode="Markdown")
+            bot.reply_to(message, f"❌ Bridge Response Error:\n`{res.text}`", parse_mode="Markdown")
     except Exception as e:
-        bot.reply_to(message, f"❌ **Connection Error:** {str(e)}")
+        bot.reply_to(message, f"❌ Connection Error: {str(e)}")
 
-def run_bot():
-    # Remove any leftover webhooks/connections before long polling
+def start_polling():
+    print("Clearing old webhooks/connections...")
     bot.remove_webhook()
+    print("Starting bot polling...")
     bot.infinity_polling(skip_pending=True)
 
 if __name__ == "__main__":
-    # Start bot thread ONLY when main script runs directly
-    threading.Thread(target=run_bot, daemon=True).start()
-    
+    # Start single thread for bot polling
+    t = threading.Thread(target=start_polling)
+    t.daemon = True
+    t.start()
+
+    # Bind port for Render Web Service health checks
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
