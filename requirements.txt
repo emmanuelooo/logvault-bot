@@ -1,4 +1,4 @@
 pyTelegramBotAPI
 requests
 flask
-js2py
+pyaes
