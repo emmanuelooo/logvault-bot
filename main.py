@@ -1,5 +1,7 @@
 import os
 import logging
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -8,8 +10,6 @@ from telegram.ext import (
     CommandHandler,
     CallbackQueryHandler,
     ContextTypes,
-    MessageHandler,
-    filters,
 )
 
 # Enable Logging
@@ -45,7 +45,7 @@ def init_db():
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
         """)
-        # Auto-patch legacy schema
+        # Auto-patch legacy schema columns
         cur.execute("ALTER TABLE products ADD COLUMN IF NOT EXISTS category VARCHAR(100) DEFAULT 'General';")
         cur.execute("ALTER TABLE products ADD COLUMN IF NOT EXISTS status VARCHAR(20) DEFAULT 'available';")
         
@@ -309,7 +309,6 @@ async def addbalance_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         # Auto-upsert target user if not present
         ensure_user_exists(conn, target_id, "User")
         
-        # Update balance and add transaction log
         cur.execute("UPDATE users SET wallet_balance = wallet_balance + %s WHERE telegram_id = %s;", (amount, target_id))
         cur.execute("INSERT INTO transactions (user_id, amount, type) VALUES (%s, %s, 'deposit');", (target_id, amount))
         
@@ -325,6 +324,7 @@ async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn = get_db_connection()
     cur = conn.cursor()
     ensure_user_exists(conn, uid, update.effective_user.username or "User")
+    conn.commit()
     cur.execute("SELECT wallet_balance FROM users WHERE telegram_id = %s;", (uid,))
     res = cur.fetchone()
     cur.close()
@@ -344,6 +344,7 @@ async def buy_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn = get_db_connection()
     cur = conn.cursor()
     ensure_user_exists(conn, uid, update.effective_user.username or "User")
+    conn.commit()
     
     # Check Product
     cur.execute("SELECT * FROM products WHERE id = %s AND status = 'available';", (pid,))
@@ -434,13 +435,33 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await query.edit_message_text(msg, parse_mode="Markdown")
 
+
+# --- DUMMY HTTP SERVER FOR RENDER PORT CHECK ---
+
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Bot is alive and polling!")
+
+def run_dummy_server():
+    port = int(os.getenv("PORT", 10000))
+    server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
+    logger.info(f"Dummy health check server running on port {port}")
+    server.serve_forever()
+
+
 def main():
     logger.info("Initializing database...")
     init_db()
 
+    # Start dummy HTTP server in a background thread to satisfy Render's port scan
+    server_thread = threading.Thread(target=run_dummy_server, daemon=True)
+    server_thread.start()
+
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    # Handlers
+    # Register Handlers
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("catalog", catalog_command))
     app.add_handler(CommandHandler("addproduct", addproduct_command))
