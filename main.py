@@ -1,10 +1,12 @@
 import os
 import logging
 import threading
+import json
 from http.server import HTTPServer, BaseHTTPRequestHandler
+import urllib.request
 import psycopg2
 from psycopg2.extras import RealDictCursor
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardRemove
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -24,10 +26,12 @@ logger = logging.getLogger(__name__)
 # Environment Variables
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 DATABASE_URL = os.getenv("DATABASE_URL")
+PAYSTACK_SECRET_KEY = os.getenv("PAYSTACK_SECRET_KEY", "")
 ADMIN_IDS = [int(x.strip()) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()]
 
-# Conversation States for Add Product Wizard
+# Conversation States
 CATEGORY, TITLE, PRICE, DATA = range(4)
+FUND_AMOUNT = range(100, 101)
 
 def get_db_connection():
     """Establish and return a database connection."""
@@ -103,21 +107,23 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.commit()
     conn.close()
 
+    # Differentiate menus based on admin status
     if is_admin(user.id):
         keyboard = [
             [InlineKeyboardButton("🛒 View Catalog", callback_data="menu_catalog"),
              InlineKeyboardButton("💳 Check Balance", callback_data="menu_balance")],
-            [InlineKeyboardButton("➕ Add Product Wizard", callback_data="wizard_start"),
-             InlineKeyboardButton("📦 Stock Control", callback_data="admin_stock")],
-            [InlineKeyboardButton("💰 Financial Ledger", callback_data="admin_finance"),
+            [InlineKeyboardButton("💳 Fund Wallet (Paystack)", callback_data="fund_start"),
+             InlineKeyboardButton("➕ Add Product Wizard", callback_data="wizard_start")],
+            [InlineKeyboardButton("📦 Stock Control", callback_data="admin_stock"),
              InlineKeyboardButton("📊 Analytics", callback_data="admin_analytics")]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
-        text = f"⚡ *LogVault Admin Dashboard*\nWelcome, {user.first_name}! Tap an option below:"
+        text = f"⚡ *LogVault Admin Dashboard*\nWelcome, {user.first_name}! Choose an option below:"
     else:
         keyboard = [
             [InlineKeyboardButton("🛒 Browse Catalog", callback_data="menu_catalog"),
-             InlineKeyboardButton("💳 My Wallet Balance", callback_data="menu_balance")]
+             InlineKeyboardButton("💳 My Wallet Balance", callback_data="menu_balance")],
+            [InlineKeyboardButton("💳 Fund Wallet Online", callback_data="fund_start")]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         text = f"👋 Welcome to LogVault, {user.first_name}!\nChoose an option below:"
@@ -188,7 +194,10 @@ async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.close()
 
     bal = res['wallet_balance'] if res else 0.00
-    keyboard = [[InlineKeyboardButton("🔙 Back to Main Menu", callback_data="menu_main")]]
+    keyboard = [
+        [InlineKeyboardButton("💳 Fund Wallet Online", callback_data="fund_start")],
+        [InlineKeyboardButton("🔙 Back to Main Menu", callback_data="menu_main")]
+    ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     text = f"💳 *Your Wallet Balance*: ₦{bal:,.2f}"
@@ -198,12 +207,86 @@ async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await target_msg.reply_text(text, reply_markup=reply_markup, parse_mode="Markdown")
 
 
-# --- STEP-BY-STEP ADD PRODUCT WIZARD (CONVERSATION HANDLER) ---
+# --- AUTOMATED FUNDING WIZARD (PAYSTACK) ---
+
+async def fund_wizard_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    await query.message.edit_text(
+        "💳 *Automated Wallet Funding*\n\n"
+        "Please type the amount in Naira you want to deposit (e.g., `2000` or `5000`):",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="menu_main")]]),
+        parse_mode="Markdown"
+    )
+    return FUND_AMOUNT
+
+async def fund_wizard_process(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text_amt = update.message.text.strip()
+    try:
+        amount = float(text_amt)
+        if amount <= 0:
+            raise ValueError()
+    except ValueError:
+        await update.message.reply_text("⚠️ Invalid amount. Please enter numbers only (e.g. `1500`):")
+        return FUND_AMOUNT
+
+    user = update.effective_user
+    uid = user.id
+    email = f"user_{uid}@logvault.bot"
+
+    url = "https://api.paystack.co/transaction/initialize"
+    payload = {
+        "email": email,
+        "amount": int(amount * 100),
+        "metadata": {
+            "telegram_id": uid,
+            "username": user.username or "Unknown"
+        }
+    }
+    
+    try:
+        data_bytes = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(
+            url, 
+            data=data_bytes, 
+            headers={
+                "Authorization": f"Bearer {PAYSTACK_SECRET_KEY}",
+                "Content-Type": "application/json"
+            }, 
+            method="POST"
+        )
+        
+        with urllib.request.urlopen(req) as response:
+            res_data = json.loads(response.read().decode("utf-8"))
+            
+        if res_data.get("status"):
+            auth_url = res_data["data"]["authorization_url"]
+            keyboard = [
+                [InlineKeyboardButton("🔗 Click Here to Pay ₦{:,.2f}".format(amount), url=auth_url)],
+                [InlineKeyboardButton("🏠 Main Menu", callback_data="menu_main")]
+            ]
+            await update.message.reply_text(
+                f"✅ *Payment Link Generated Successfully!*\n\n"
+                f"Amount: *₦{amount:,.2f}*\n"
+                f"Click the secure button below to complete your payment. Your wallet will be credited automatically once successful!",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode="Markdown"
+            )
+        else:
+            await update.message.reply_text("❌ Failed to generate payment link from Paystack. Try again later.")
+    except Exception as e:
+        logger.error(f"Paystack Init Error: {e}")
+        await update.message.reply_text(f"❌ Payment service connection error: `{e}`", parse_mode="Markdown")
+
+    return ConversationHandler.END
+
+
+# --- STEP-BY-STEP ADD PRODUCT WIZARD (ADMIN ONLY) ---
 
 async def wizard_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if not is_admin(query.from_user.id):
-        await query.answer("Unauthorized", show_alert=True)
+        await query.answer("⚠️ Unauthorized Action!", show_alert=True)
         return
     await query.answer()
     
@@ -286,7 +369,7 @@ async def wizard_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
-# --- CALLBACK ROUTER FOR BUTTON TAPS ---
+# --- CALLBACK ROUTER ---
 
 async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -305,8 +388,6 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await process_purchase(query, uid, pid)
     elif data == "admin_stock":
         await show_stock_panel(query)
-    elif data == "admin_finance":
-        await query.edit_message_text("💰 *Financial Ledger*\nTo top up a user via chat, reply or use command/sql.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="menu_main")]]), parse_mode="Markdown")
     elif data == "admin_analytics":
         await show_analytics(query)
 
@@ -329,7 +410,10 @@ async def process_purchase(query, uid, pid):
     user_bal = cur.fetchone()['wallet_balance']
 
     if user_bal < prod['price']:
-        keyboard = [[InlineKeyboardButton("🔙 Back to Catalog", callback_data="menu_catalog")]]
+        keyboard = [
+            [InlineKeyboardButton("💳 Fund Wallet Online", callback_data="fund_start")],
+            [InlineKeyboardButton("🔙 Back to Catalog", callback_data="menu_catalog")]
+        ]
         await query.edit_message_text(
             f"❌ *Insufficient Funds!*\nPrice: ₦{prod['price']:,.2f} | Your Balance: ₦{user_bal:,.2f}",
             reply_markup=InlineKeyboardMarkup(keyboard),
@@ -365,6 +449,7 @@ async def process_purchase(query, uid, pid):
 
 async def show_stock_panel(query):
     if not is_admin(query.from_user.id):
+        await query.answer("⚠️ Unauthorized Action!", show_alert=True)
         return
     conn = get_db_connection()
     cur = conn.cursor()
@@ -382,6 +467,7 @@ async def show_stock_panel(query):
 
 async def show_analytics(query):
     if not is_admin(query.from_user.id):
+        await query.answer("⚠️ Unauthorized Action!", show_alert=True)
         return
     conn = get_db_connection()
     cur = conn.cursor()
@@ -404,18 +490,54 @@ async def show_analytics(query):
     )
 
 
-# --- DUMMY HTTP SERVER FOR RENDER PORT CHECK ---
+# --- HTTP SERVER & PAYSTACK WEBHOOK LISTENER ---
 
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"Bot is alive and polling!")
+        self.wfile.write(b"Bot is alive, polling, and webhook listener active!")
 
-def run_dummy_server():
+    def do_POST(self):
+        if self.path == "/webhook/paystack":
+            content_length = int(self.headers.get('Content-Length', 0))
+            post_data = self.rfile.read(content_length)
+            
+            try:
+                event_json = json.loads(post_data.decode('utf-8'))
+                
+                if event_json.get("event") == "charge.success":
+                    data = event_json.get("data", {})
+                    metadata = data.get("metadata", {})
+                    telegram_id = metadata.get("telegram_id")
+                    amount_in_kobo = data.get("amount", 0)
+                    amount_in_naira = amount_in_kobo / 100.0
+                    
+                    if telegram_id:
+                        conn = get_db_connection()
+                        cur = conn.cursor()
+                        cur.execute("UPDATE users SET wallet_balance = wallet_balance + %s WHERE telegram_id = %s;", (amount_in_naira, telegram_id))
+                        cur.execute("INSERT INTO transactions (user_id, amount, type) VALUES (%s, %s, 'deposit');", (telegram_id, amount_in_naira))
+                        conn.commit()
+                        cur.close()
+                        conn.close()
+                        logger.info(f"Successfully credited ₦{amount_in_naira} to user {telegram_id} via Paystack webhook.")
+
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b"Webhook received successfully")
+            except Exception as e:
+                logger.error(f"Webhook processing error: {e}")
+                self.send_response(500)
+                self.end_headers()
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+def run_server():
     port = int(os.getenv("PORT", 10000))
     server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
-    logger.info(f"Dummy health check server running on port {port}")
+    logger.info(f"HTTP server & Webhook listener running on port {port}")
     server.serve_forever()
 
 
@@ -423,13 +545,11 @@ def main():
     logger.info("Initializing database...")
     init_db()
 
-    # Start dummy HTTP server in background thread for Render
-    server_thread = threading.Thread(target=run_dummy_server, daemon=True)
+    server_thread = threading.Thread(target=run_server, daemon=True)
     server_thread.start()
 
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    # Conversation Wizard Handler for adding products interactively
     add_product_wizard = ConversationHandler(
         entry_points=[CallbackQueryHandler(wizard_start, pattern="^wizard_start$")],
         states={
@@ -444,15 +564,24 @@ def main():
         fallbacks=[CallbackQueryHandler(wizard_cancel, pattern="^menu_main$")],
     )
 
-    # Register Handlers
+    fund_wallet_wizard = ConversationHandler(
+        entry_points=[CallbackQueryHandler(fund_wizard_start, pattern="^fund_start$")],
+        states={
+            FUND_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, fund_wizard_process)]
+        },
+        fallbacks=[CallbackQueryHandler(wizard_cancel, pattern="^menu_main$")],
+    )
+
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("catalog", catalog_command))
     app.add_handler(CommandHandler("balance", balance_command))
     app.add_handler(add_product_wizard)
+    app.add_handler(fund_wallet_wizard)
     app.add_handler(CallbackQueryHandler(callback_router))
 
-    logger.info("Initiating interactive button bot polling loop...")
+    logger.info("Initiating role-secured bot polling loop...")
     app.run_polling()
 
 if __name__ == "__main__":
     main()
+    
