@@ -28,6 +28,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 DATABASE_URL = os.getenv("DATABASE_URL")
 PAYSTACK_SECRET_KEY = os.getenv("PAYSTACK_SECRET_KEY", "")
 ADMIN_IDS = [int(x.strip()) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()]
+SUPPORT_USERNAME = os.getenv("SUPPORT_USERNAME", "YourUsername") # Change to your support telegram username
 
 # Conversation States
 CATEGORY, TITLE, PRICE, DATA = range(4)
@@ -107,15 +108,16 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.commit()
     conn.close()
 
-    # Differentiate menus based on admin status
     if is_admin(user.id):
         keyboard = [
             [InlineKeyboardButton("🛒 View Catalog", callback_data="menu_catalog"),
              InlineKeyboardButton("💳 Check Balance", callback_data="menu_balance")],
             [InlineKeyboardButton("💳 Fund Wallet (Paystack)", callback_data="fund_start"),
-             InlineKeyboardButton("➕ Add Product Wizard", callback_data="wizard_start")],
-            [InlineKeyboardButton("📦 Stock Control", callback_data="admin_stock"),
-             InlineKeyboardButton("📊 Analytics", callback_data="admin_analytics")]
+             InlineKeyboardButton("📜 My Orders", callback_data="menu_orders")],
+            [InlineKeyboardButton("➕ Add Product Wizard", callback_data="wizard_start"),
+             InlineKeyboardButton("📦 Stock Control", callback_data="admin_stock")],
+            [InlineKeyboardButton("📊 Analytics", callback_data="admin_analytics"),
+             InlineKeyboardButton("💬 Support", url=f"https://t.me/{SUPPORT_USERNAME}")]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         text = f"⚡ *LogVault Admin Dashboard*\nWelcome, {user.first_name}! Choose an option below:"
@@ -123,7 +125,9 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard = [
             [InlineKeyboardButton("🛒 Browse Catalog", callback_data="menu_catalog"),
              InlineKeyboardButton("💳 My Wallet Balance", callback_data="menu_balance")],
-            [InlineKeyboardButton("💳 Fund Wallet Online", callback_data="fund_start")]
+            [InlineKeyboardButton("💳 Fund Wallet Online", callback_data="fund_start"),
+             InlineKeyboardButton("📜 My Orders", callback_data="menu_orders")],
+            [InlineKeyboardButton("💬 Support / Help", url=f"https://t.me/{SUPPORT_USERNAME}")]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         text = f"👋 Welcome to LogVault, {user.first_name}!\nChoose an option below:"
@@ -205,6 +209,39 @@ async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(text, reply_markup=reply_markup, parse_mode="Markdown")
     else:
         await target_msg.reply_text(text, reply_markup=reply_markup, parse_mode="Markdown")
+
+async def orders_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    uid = query.from_user.id
+
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT t.id, t.amount, t.created_at, p.title, p.data 
+        FROM transactions t 
+        LEFT JOIN products p ON t.product_id = p.id 
+        WHERE t.user_id = %s AND t.type = 'purchase' 
+        ORDER BY t.created_at DESC LIMIT 10;
+    """, (uid,))
+    orders = cur.fetchall()
+    cur.close()
+    conn.close()
+
+    if not orders:
+        keyboard = [[InlineKeyboardButton("🔙 Back to Main Menu", callback_data="menu_main")]]
+        await query.edit_message_text("📜 *My Orders*: You haven't made any purchases yet.", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+        return
+
+    text = "📜 *Your Recent Purchase History*\n\n"
+    for o in orders:
+        title = o['title'] or "Digital Asset"
+        creds = o['data'] or "N/A"
+        date_str = o['created_at'].strftime("%Y-%m-%d %H:%M") if o['created_at'] else "Recent"
+        text += f"• *{title}* (₦{o['amount']:,.2f})\n  📅 `{date_str}`\n  🔑 Credentials: `{creds}`\n\n"
+
+    keyboard = [[InlineKeyboardButton("🔙 Back to Main Menu", callback_data="menu_main")]]
+    await query.edit_message_text(text, reply_markup=reply_markup, parse_mode="Markdown")
 
 
 # --- AUTOMATED FUNDING WIZARD (PAYSTACK) ---
@@ -383,6 +420,8 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await catalog_command(update, context)
     elif data == "menu_balance":
         await balance_command(update, context)
+    elif data == "menu_orders":
+        await orders_command(update, context)
     elif data.startswith("buy_item_"):
         pid = int(data.replace("buy_item_", ""))
         await process_purchase(query, uid, pid)
@@ -579,9 +618,8 @@ def main():
     app.add_handler(fund_wallet_wizard)
     app.add_handler(CallbackQueryHandler(callback_router))
 
-    logger.info("Initiating role-secured bot polling loop...")
+    logger.info("Initiating fully-featured bot polling loop...")
     app.run_polling()
 
 if __name__ == "__main__":
     main()
-    
